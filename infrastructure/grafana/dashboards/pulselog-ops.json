@@ -1,0 +1,175 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Ingestion accept rate",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(pulselog_ingest_events_accepted_total[30s])",
+          "legendFormat": "accepted/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "Ingestion HTTP latency",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(pulselog_http_request_duration_seconds_bucket{job=\"ingestion-api\"}[30s])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(pulselog_http_request_duration_seconds_bucket{job=\"ingestion-api\"}[30s])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "id": 3,
+      "title": "Processor throughput",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(pulselog_processor_events_consumed_total[30s])",
+          "legendFormat": "consumed/s",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(pulselog_processor_events_written_total[30s])",
+          "legendFormat": "written/s",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "id": 4,
+      "title": "Kafka consumer lag",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "pulselog_kafka_consumer_lag",
+          "legendFormat": "lag",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "id": 5,
+      "title": "ClickHouse write latency",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(pulselog_processor_clickhouse_write_duration_seconds_bucket[30s])) by (le))",
+          "legendFormat": "p95 write",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "id": 6,
+      "title": "Query API latency",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(pulselog_http_request_duration_seconds_bucket{job=\"query-api\"}[30s])) by (le))",
+          "legendFormat": "p95",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "id": 7,
+      "title": "Errors and rejects",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "rate(pulselog_ingest_events_rejected_total[30s])",
+          "legendFormat": "ingest rejected",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(pulselog_processor_events_failed_total[30s])",
+          "legendFormat": "processor failed",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(pulselog_rate_limited_total[30s])",
+          "legendFormat": "rate limited",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "id": 8,
+      "title": "WebSocket / realtime",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "pulselog_ws_connections",
+          "legendFormat": "connections",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(pulselog_ws_messages_delivered_total[30s])",
+          "legendFormat": "delivered/s",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(pulselog_ws_messages_dropped_total[30s])",
+          "legendFormat": "dropped/s",
+          "refId": "C"
+        },
+        {
+          "expr": "rate(pulselog_realtime_published_total[30s])",
+          "legendFormat": "published/s",
+          "refId": "D"
+        }
+      ]
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 39,
+  "tags": ["pulselog", "ops"],
+  "templating": { "list": [] },
+  "time": { "from": "now-15m", "to": "now" },
+  "timezone": "browser",
+  "title": "PulseLog operations",
+  "uid": "pulselog-ops",
+  "version": 1
+}

@@ -1,0 +1,51 @@
+# Binaries
+bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.out
+coverage.html
+
+# Go
+vendor/
+
+# Environment and secrets
+.env
+.env.local
+.env.prod
+.env.*.local
+tests/load/.credentials.json
+.tmp-*
+.tmp-*.json
+*.pem
+*.key
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+apps/dashboard/.next/
+apps/dashboard/out/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Docker
+.docker/
+
+# OS
+desktop.ini

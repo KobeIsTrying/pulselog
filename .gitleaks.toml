@@ -1,0 +1,18 @@
+title = "PulseLog"
+
+[allowlist]
+description = "Documented local-only placeholders, not production credentials"
+paths = [
+  '''\.env\.example$''',
+  '''\.env\.prod\.example$''',
+  '''apps/dashboard/\.env\.example$''',
+  '''deploy/kubernetes/secret\.example\.yaml$''',
+  '''docs/''',
+  '''README\.md$''',
+]
+regexes = [
+  '''pulselog_dev_only''',
+  '''pulselog_dev_jwt_only''',
+  '''dashboard-demo-pass''',
+  '''bench-phase7-pass''',
+]

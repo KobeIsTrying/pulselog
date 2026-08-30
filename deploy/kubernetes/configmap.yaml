@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pulselog-config
+  namespace: pulselog
+  labels:
+    app.kubernetes.io/name: pulselog
+data:
+  ENV: "production"
+  LOG_LEVEL: "info"
+  KAFKA_TOPIC_INGEST: "logs-ingest"
+  KAFKA_TOPIC_DLQ: "logs-dlq"
+  KAFKA_CONSUMER_GROUP: "log-processor"
+  CLICKHOUSE_DATABASE: "pulselog"
+  CLICKHOUSE_USER: "pulselog"
+  CLICKHOUSE_TABLE: "logs"
+  CLICKHOUSE_TTL_DAYS: "90"
+  CLICKHOUSE_MV_TTL_DAYS: "180"
+  AUTH_SIGNUPS: "false"
+  JWT_TTL: "24h"
+  RATE_LIMIT_LOGIN: "10"
+  RATE_LIMIT_INGEST: "120"
+  RATE_LIMIT_QUERY: "120"
+  WS_HUB_BUFFER: "256"
+  COOKIE_SECURE: "true"
+  # Replace with the public dashboard origin(s). Never use *.
+  CORS_ORIGINS: "https://pulselog.example.com"
+  QUERY_API_URL: "http://query-api:8082"
+  QUERY_WS_PUBLIC_URL: "wss://api.pulselog.example.com/api/v1/stream"

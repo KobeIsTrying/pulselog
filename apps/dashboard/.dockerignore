@@ -1,0 +1,14 @@
+node_modules
+.next
+out
+coverage
+*.md
+.env
+.env.local
+.env.*.local
+.git
+.gitignore
+vitest.config.mts
+src/**/*.test.ts
+src/**/*.test.tsx
+src/test

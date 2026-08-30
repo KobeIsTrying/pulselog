@@ -1,0 +1,357 @@
+# Production-like Compose. For a single-VM portfolio/demo this file is the
+# recommended path. It is not a multi-AZ HA architecture.
+#
+# Public host ports: dashboard :3000, ingest :8080, query/WS :8082.
+# PostgreSQL, Redis, Kafka, ClickHouse, processor, and metrics stay on the
+# internal `data` network and are not published.
+#
+# Copy ../.env.prod.example to ../.env.prod and replace placeholders.
+
+name: pulselog
+
+services:
+  kafka-data-init:
+    image: busybox:1.37
+    user: "0:0"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    command: ["sh", "-c", "mkdir -p /var/lib/kafka/data && chown -R 1000:1000 /var/lib/kafka/data"]
+    restart: "no"
+    networks: [data]
+
+  kafka:
+    image: apache/kafka:3.9.0
+    hostname: kafka
+    depends_on:
+      kafka-data-init:
+        condition: service_completed_successfully
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: CONTROLLER://:29093,PLAINTEXT://:19092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 25s
+    networks: [data]
+
+  kafka-init:
+    image: apache/kafka:3.9.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic logs-ingest --partitions 6 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic logs-dlq --partitions 3 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --list
+    networks: [data]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment:
+      CLICKHOUSE_DB: pulselog
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-pulselog}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user $$CLICKHOUSE_USER --password $$CLICKHOUSE_PASSWORD --query 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks: [data]
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pulselog}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-pulselog}
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [data]
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [data]
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: cmd/migrate/Dockerfile
+    environment:
+      ENV: ${ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      POSTGRES_DSN: ${POSTGRES_DSN:?POSTGRES_DSN is required}
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-pulselog}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-pulselog}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required}
+      CLICKHOUSE_TABLE: logs
+      CLICKHOUSE_TTL_DAYS: ${CLICKHOUSE_TTL_DAYS:-90}
+      CLICKHOUSE_MV_TTL_DAYS: ${CLICKHOUSE_MV_TTL_DAYS:-180}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    restart: "no"
+    networks: [data]
+
+  ingestion-api:
+    build:
+      context: ..
+      dockerfile: services/ingestion-api/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      ENV: ${ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      HTTP_ADDR: :8080
+      KAFKA_BROKERS: kafka:19092
+      KAFKA_TOPIC_INGEST: logs-ingest
+      KAFKA_WRITE_TIMEOUT: 5s
+      POSTGRES_DSN: ${POSTGRES_DSN:?POSTGRES_DSN is required}
+      REDIS_ADDR: redis:6379
+      RATE_LIMIT_INGEST: ${RATE_LIMIT_INGEST:-120}
+      RATE_LIMIT_INGEST_WINDOW: ${RATE_LIMIT_INGEST_WINDOW:-1m}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 15s
+    networks: [edge, data]
+
+  log-processor:
+    build:
+      context: ..
+      dockerfile: services/log-processor/Dockerfile
+    environment:
+      ENV: ${ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PROCESSOR_HTTP_ADDR: :8081
+      KAFKA_BROKERS: kafka:19092
+      KAFKA_TOPIC_INGEST: logs-ingest
+      KAFKA_TOPIC_DLQ: logs-dlq
+      KAFKA_CONSUMER_GROUP: log-processor
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-pulselog}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-pulselog}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required}
+      CLICKHOUSE_TTL_DAYS: ${CLICKHOUSE_TTL_DAYS:-90}
+      CLICKHOUSE_MV_TTL_DAYS: ${CLICKHOUSE_MV_TTL_DAYS:-180}
+      PROCESSOR_BATCH_SIZE: ${PROCESSOR_BATCH_SIZE:-100}
+      PROCESSOR_BATCH_TIMEOUT: 500ms
+      PROCESSOR_MAX_ATTEMPTS: "5"
+      PROCESSOR_RETRY_BACKOFF: 200ms
+      PROCESSOR_SHUTDOWN_GRACE: 15s
+      REDIS_ADDR: redis:6379
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 25s
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    networks: [data]
+
+  query-api:
+    build:
+      context: ..
+      dockerfile: services/query-api/Dockerfile
+    ports:
+      - "8082:8082"
+    environment:
+      ENV: ${ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      QUERY_HTTP_ADDR: :8082
+      QUERY_TIMEOUT: 5s
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-pulselog}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-pulselog}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required}
+      CLICKHOUSE_TABLE: logs
+      CLICKHOUSE_TTL_DAYS: ${CLICKHOUSE_TTL_DAYS:-90}
+      CLICKHOUSE_MV_TTL_DAYS: ${CLICKHOUSE_MV_TTL_DAYS:-180}
+      POSTGRES_DSN: ${POSTGRES_DSN:?POSTGRES_DSN is required}
+      REDIS_ADDR: redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_TTL: ${JWT_TTL:-24h}
+      AUTH_SIGNUPS: ${AUTH_SIGNUPS:-false}
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      WS_HUB_BUFFER: ${WS_HUB_BUFFER:-256}
+      RATE_LIMIT_LOGIN: ${RATE_LIMIT_LOGIN:-10}
+      RATE_LIMIT_QUERY: ${RATE_LIMIT_QUERY:-120}
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8082/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 15s
+    networks: [edge, data]
+
+  dashboard:
+    build:
+      context: ../apps/dashboard
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      QUERY_API_URL: http://query-api:8082
+      QUERY_WS_PUBLIC_URL: ${QUERY_WS_PUBLIC_URL:-ws://127.0.0.1:8082/api/v1/stream}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+    depends_on:
+      query-api:
+        condition: service_healthy
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 25s
+    networks: [edge]
+
+  proxy:
+    image: caddy:2.8-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on:
+      dashboard:
+        condition: service_healthy
+      query-api:
+        condition: service_healthy
+      ingestion-api:
+        condition: service_healthy
+    profiles:
+      - proxy
+    networks: [edge]
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus/prometheus.prod.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=24h
+      - --web.enable-lifecycle
+    profiles:
+      - obs
+    networks: [data, edge]
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    ports:
+      - "127.0.0.1:3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-replace-before-enabling-obs}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_DEFAULT_THEME: dark
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://127.0.0.1:3001}
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    profiles:
+      - obs
+    networks: [edge]
+
+networks:
+  edge:
+    name: pulselog_edge
+  data:
+    name: pulselog_data
+    internal: true
+
+volumes:
+  kafka_data:
+  clickhouse_data:
+  postgres_data:
+  redis_data:
+  caddy_data:

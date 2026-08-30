@@ -1,0 +1,16 @@
+.git
+.github
+.next
+node_modules
+bin
+dist
+coverage.out
+**/.env
+**/.env.local
+**/.env.prod
+**/.env.*.local
+tests/load/.credentials.json
+apps/dashboard
+docs
+scripts
+*.md

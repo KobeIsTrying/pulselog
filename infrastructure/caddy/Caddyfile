@@ -1,0 +1,20 @@
+# Portfolio / demo reverse proxy. Terminate TLS at Caddy (or a cloud load balancer)
+# rather than in each Go/Next.js process. WebSocket upgrades are handled automatically.
+#
+# Local HTTP demo (no certificates):
+#   pulselog.localhost, api.pulselog.localhost, ingest.pulselog.localhost
+#
+# Production hostnames should be set in this file or via Caddy on_demand / a
+# generated Caddyfile. Do not expose PostgreSQL, Redis, Kafka, or ClickHouse here.
+
+http://pulselog.localhost, :80 {
+	reverse_proxy dashboard:3000
+}
+
+http://api.pulselog.localhost {
+	reverse_proxy query-api:8082
+}
+
+http://ingest.pulselog.localhost {
+	reverse_proxy ingestion-api:8080
+}

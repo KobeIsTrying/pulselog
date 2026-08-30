@@ -1,0 +1,326 @@
+name: pulselog
+
+services:
+  kafka-data-init:
+    image: busybox:1.37
+    user: "0:0"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    command: ["sh", "-c", "mkdir -p /var/lib/kafka/data && chown -R 1000:1000 /var/lib/kafka/data"]
+    restart: "no"
+
+  kafka:
+    image: apache/kafka:3.9.0
+    hostname: kafka
+    depends_on:
+      kafka-data-init:
+        condition: service_completed_successfully
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: CONTROLLER://:29093,PLAINTEXT://:19092,PLAINTEXT_HOST://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:19092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      CLUSTER_ID: 4L6g3nShT-eMCtK--X86sw
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:19092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 25s
+
+  kafka-init:
+    image: apache/kafka:3.9.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic logs-ingest --partitions 6 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --create --if-not-exists --topic logs-dlq --partitions 3 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:19092 --list
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      CLICKHOUSE_DB: pulselog
+      CLICKHOUSE_USER: pulselog
+      CLICKHOUSE_PASSWORD: pulselog_dev_only
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user pulselog --password pulselog_dev_only --query 'SELECT 1'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: pulselog
+      POSTGRES_PASSWORD: pulselog_dev_only
+      POSTGRES_DB: pulselog
+    volumes:
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pulselog -d pulselog"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  ingestion-api:
+    build:
+      context: ..
+      dockerfile: services/ingestion-api/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      ENV: development
+      LOG_LEVEL: info
+      HTTP_ADDR: :8080
+      KAFKA_BROKERS: kafka:19092
+      KAFKA_TOPIC_INGEST: logs-ingest
+      KAFKA_WRITE_TIMEOUT: 5s
+      POSTGRES_DSN: postgres://pulselog:pulselog_dev_only@postgres:5432/pulselog?sslmode=disable
+      REDIS_ADDR: redis:6379
+      RATE_LIMIT_INGEST: "120"
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    profiles:
+      - app
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 15s
+
+  log-processor:
+    build:
+      context: ..
+      dockerfile: services/log-processor/Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      ENV: development
+      LOG_LEVEL: info
+      PROCESSOR_HTTP_ADDR: :8081
+      KAFKA_BROKERS: kafka:19092
+      KAFKA_TOPIC_INGEST: logs-ingest
+      KAFKA_TOPIC_DLQ: logs-dlq
+      KAFKA_CONSUMER_GROUP: log-processor
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DATABASE: pulselog
+      CLICKHOUSE_USER: pulselog
+      CLICKHOUSE_PASSWORD: pulselog_dev_only
+      PROCESSOR_BATCH_SIZE: "100"
+      PROCESSOR_BATCH_TIMEOUT: 500ms
+      PROCESSOR_MAX_ATTEMPTS: "5"
+      PROCESSOR_RETRY_BACKOFF: 200ms
+      PROCESSOR_SHUTDOWN_GRACE: 15s
+      CLICKHOUSE_TTL_DAYS: ${CLICKHOUSE_TTL_DAYS:-90}
+      CLICKHOUSE_MV_TTL_DAYS: ${CLICKHOUSE_MV_TTL_DAYS:-180}
+      REDIS_ADDR: redis:6379
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    profiles:
+      - app
+    stop_grace_period: 25s
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8081/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+
+  query-api:
+    build:
+      context: ..
+      dockerfile: services/query-api/Dockerfile
+    ports:
+      - "8082:8082"
+    environment:
+      ENV: development
+      LOG_LEVEL: info
+      QUERY_HTTP_ADDR: :8082
+      QUERY_TIMEOUT: 5s
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DATABASE: pulselog
+      CLICKHOUSE_USER: pulselog
+      CLICKHOUSE_PASSWORD: pulselog_dev_only
+      CLICKHOUSE_TABLE: logs
+      POSTGRES_DSN: postgres://pulselog:pulselog_dev_only@postgres:5432/pulselog?sslmode=disable
+      REDIS_ADDR: redis:6379
+      JWT_SECRET: pulselog_dev_jwt_only
+      JWT_TTL: 24h
+      AUTH_SIGNUPS: "true"
+      CORS_ORIGINS: http://127.0.0.1:3000,http://localhost:3000
+      WS_HUB_BUFFER: "256"
+      CLICKHOUSE_TTL_DAYS: ${CLICKHOUSE_TTL_DAYS:-90}
+      CLICKHOUSE_MV_TTL_DAYS: ${CLICKHOUSE_MV_TTL_DAYS:-180}
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    profiles:
+      - app
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8082/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 8
+      start_period: 15s
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: cmd/migrate/Dockerfile
+    environment:
+      ENV: development
+      LOG_LEVEL: info
+      POSTGRES_DSN: postgres://pulselog:pulselog_dev_only@postgres:5432/pulselog?sslmode=disable
+      CLICKHOUSE_ADDR: clickhouse:9000
+      CLICKHOUSE_DATABASE: pulselog
+      CLICKHOUSE_USER: pulselog
+      CLICKHOUSE_PASSWORD: pulselog_dev_only
+      CLICKHOUSE_TABLE: logs
+      CLICKHOUSE_TTL_DAYS: ${CLICKHOUSE_TTL_DAYS:-90}
+      CLICKHOUSE_MV_TTL_DAYS: ${CLICKHOUSE_MV_TTL_DAYS:-180}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    restart: "no"
+    profiles:
+      - app
+
+  dashboard:
+    build:
+      context: ../apps/dashboard
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      QUERY_API_URL: http://query-api:8082
+      QUERY_WS_PUBLIC_URL: ws://127.0.0.1:8082/api/v1/stream
+      COOKIE_SECURE: "false"
+    depends_on:
+      query-api:
+        condition: service_healthy
+    stop_grace_period: 15s
+    profiles:
+      - app
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 25s
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=24h
+    profiles:
+      - obs
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: pulselog_dev_only
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: dark
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+    profiles:
+      - obs
+
+volumes:
+  kafka_data:
+  clickhouse_data:
+  postgres_data:
+  redis_data:
